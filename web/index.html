@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>webOS Web Installer - Demo</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:20px}
+    #logs{background:#111;color:#0f0;padding:10px;height:300px;overflow:auto;white-space:pre-wrap}
+  </style>
+</head>
+<body>
+  <h1>webOS Web Installer (demo)</h1>
+  <label>Device ID: <input id="deviceId" placeholder="deviceId"></label><br><br>
+  <input type="file" id="ipkFile" accept=".ipk"><br><br>
+  <button id="installBtn">Instalar</button>
+
+  <h3>Logs</h3>
+  <pre id="logs"></pre>
+
+  <script>
+    const installBtn = document.getElementById('installBtn');
+    const logs = document.getElementById('logs');
+
+    function appendLog(line) {
+      logs.textContent += line + '\n';
+      logs.scrollTop = logs.scrollHeight;
+    }
+
+    installBtn.onclick = async () => {
+      const deviceId = document.getElementById('deviceId').value.trim();
+      const fileInput = document.getElementById('ipkFile');
+      if (!deviceId || fileInput.files.length === 0) {
+        alert('Device ID y fichero .ipk son obligatorios');
+        return;
+      }
+      const fd = new FormData();
+      fd.append('deviceId', deviceId);
+      fd.append('ipk', fileInput.files[0]);
+
+      logs.textContent = 'Enviando paquete al helper local...\n';
+      let resp;
+      try {
+        resp = await fetch('http://127.0.0.1:3000/install-file', {
+          method: 'POST',
+          body: fd
+        });
+      } catch (e) {
+        appendLog('[error] No se pudo conectar al helper local: ' + e.message);
+        appendLog('Asegúrate de ejecutar `npm run start` en el repo para arrancar el helper.');
+        return;
+      }
+
+      if (!resp.ok) {
+        appendLog('[error] Respuesta del helper: ' + await resp.text());
+        return;
+      }
+
+      appendLog('[info] Conectado. Recibiendo logs...');
+
+      // Leer flujo de texto chunked con JSON por línea
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === 'stdout' || obj.type === 'stderr') {
+              appendLog('[' + obj.type + '] ' + obj.text.trim());
+            } else if (obj.type === 'exit') {
+              appendLog('[exit] Código: ' + obj.code);
+            } else if (obj.type === 'error') {
+              appendLog('[error] ' + obj.error);
+            } else {
+              appendLog('[info] ' + JSON.stringify(obj));
+            }
+          } catch (e) {
+            appendLog('[parse-error] ' + line);
+          }
+        }
+      }
+      appendLog('[info] Flujo finalizado.');
+    };
+  </script>
+</body>
+</html>
