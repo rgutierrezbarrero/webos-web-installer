@@ -5,26 +5,64 @@
   <title>webOS Web Installer - Demo</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:20px}
-    #logs{background:#111;color:#0f0;padding:10px;height:300px;overflow:auto;white-space:pre-wrap}
+    body { font-family: system-ui, Segoe UI, Roboto, Arial; margin: 20px; max-width: 860px; }
+    #logs { background: #111; color: #ccc; padding: 10px; height: 320px; overflow: auto; white-space: pre-wrap; font-family: monospace; font-size: 13px; border-radius: 4px; }
+    .log-stdout { color: #6f6; }
+    .log-stderr { color: #fa0; }
+    .log-error  { color: #f55; }
+    .log-info   { color: #8cf; }
+    .log-exit   { color: #fff; font-weight: bold; }
+    #notice { display: none; margin-top: 14px; padding: 12px 16px; border-radius: 6px; }
+    #notice.warn  { background: #fff3cd; border: 1px solid #ffc107; color: #664d03; }
+    #notice.ok    { background: #d1e7dd; border: 1px solid #198754; color: #0a3622; }
+    #notice.fail  { background: #f8d7da; border: 1px solid #dc3545; color: #58151c; }
+    #notice pre   { margin: 8px 0 0; background: rgba(0,0,0,.08); padding: 6px 8px; border-radius: 4px; font-size: 12px; white-space: pre-wrap; }
+    button { padding: 6px 18px; cursor: pointer; }
   </style>
 </head>
 <body>
   <h1>webOS Web Installer (demo)</h1>
-  <label>Device ID: <input id="deviceId" placeholder="deviceId"></label><br><br>
+  <label>Device ID / IP: <input id="deviceId" placeholder="p.ej. 192.168.1.35 o myTV" style="width:260px"></label><br><br>
   <input type="file" id="ipkFile" accept=".ipk"><br><br>
   <button id="installBtn">Instalar</button>
 
-  <h3>Logs</h3>
-  <pre id="logs"></pre>
+  <h3>Logs de ares install</h3>
+  <div id="logs"></div>
+
+  <div id="notice"></div>
 
   <script>
     const installBtn = document.getElementById('installBtn');
-    const logs = document.getElementById('logs');
+    const logsEl = document.getElementById('logs');
+    const noticeEl = document.getElementById('notice');
 
-    function appendLog(line) {
-      logs.textContent += line + '\n';
-      logs.scrollTop = logs.scrollHeight;
+    function appendLog(text, cls) {
+      const span = document.createElement('span');
+      span.className = cls || '';
+      span.textContent = text + '\n';
+      logsEl.appendChild(span);
+      logsEl.scrollTop = logsEl.scrollHeight;
+    }
+
+    function showNotice(html, cls) {
+      noticeEl.className = cls;
+      noticeEl.innerHTML = html;
+      noticeEl.style.display = 'block';
+    }
+
+    function buildManualCmds(deviceId, ipkName) {
+      const dev = deviceId || '<device>';
+      const ipk = ipkName || '<archivo.ipk>';
+      return [
+        `# Verificar que la app aparece en la TV (lista de apps instaladas):`,
+        `ares-launch --device ${dev} --list`,
+        ``,
+        `# Reinstalar manualmente (ejecuta en tu terminal con ares en el PATH):`,
+        `ares-install --device ${dev} ${ipk}`,
+        ``,
+        `# Comprobar si el device está correctamente registrado:`,
+        `ares-setup-device --list`,
+      ].join('\n');
     }
 
     installBtn.onclick = async () => {
@@ -34,11 +72,15 @@
         alert('Device ID y fichero .ipk son obligatorios');
         return;
       }
+      const ipkName = fileInput.files[0].name;
       const fd = new FormData();
       fd.append('deviceId', deviceId);
       fd.append('ipk', fileInput.files[0]);
 
-      logs.textContent = 'Enviando paquete al helper local...\n';
+      logsEl.innerHTML = '';
+      noticeEl.style.display = 'none';
+      appendLog('Enviando paquete al helper local...', 'log-info');
+
       let resp;
       try {
         resp = await fetch('http://127.0.0.1:3000/install-file', {
@@ -46,19 +88,20 @@
           body: fd
         });
       } catch (e) {
-        appendLog('[error] No se pudo conectar al helper local: ' + e.message);
-        appendLog('Asegúrate de ejecutar `npm run start` en el repo para arrancar el helper.');
+        appendLog('[error] No se pudo conectar al helper local: ' + e.message, 'log-error');
+        appendLog('Asegúrate de ejecutar `npm run start` en el repo para arrancar el helper.', 'log-info');
         return;
       }
 
       if (!resp.ok) {
-        appendLog('[error] Respuesta del helper: ' + await resp.text());
+        const body = await resp.text();
+        appendLog('[error] Respuesta del helper (' + resp.status + '): ' + body, 'log-error');
         return;
       }
 
-      appendLog('[info] Conectado. Recibiendo logs...');
+      appendLog('[info] Conectado. Recibiendo logs de ares install...', 'log-info');
 
-      // Leer flujo de texto chunked con JSON por línea
+      // Leer flujo chunked con JSON por línea
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
@@ -66,28 +109,63 @@
         const { done, value } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
-        let lines = buf.split('\n');
+        const lines = buf.split('\n');
         buf = lines.pop();
         for (const line of lines) {
           if (!line.trim()) continue;
-          try {
-            const obj = JSON.parse(line);
-            if (obj.type === 'stdout' || obj.type === 'stderr') {
-              appendLog('[' + obj.type + '] ' + obj.text.trim());
-            } else if (obj.type === 'exit') {
-              appendLog('[exit] Código: ' + obj.code);
-            } else if (obj.type === 'error') {
-              appendLog('[error] ' + obj.error);
+          let obj;
+          try { obj = JSON.parse(line); } catch (e) {
+            appendLog('[parse-error] ' + line, 'log-error');
+            continue;
+          }
+          if (obj.type === 'stdout') {
+            appendLog('[stdout] ' + obj.text.trimEnd(), 'log-stdout');
+          } else if (obj.type === 'stderr') {
+            appendLog('[stderr] ' + obj.text.trimEnd(), 'log-stderr');
+          } else if (obj.type === 'info') {
+            appendLog('[info] ' + obj.text, 'log-info');
+          } else if (obj.type === 'error') {
+            appendLog('[error] ' + obj.error, 'log-error');
+            showNotice(
+              '<strong>❌ Error al lanzar ares install</strong><br>' + escHtml(obj.error),
+              'fail'
+            );
+          } else if (obj.type === 'exit') {
+            const code = obj.code;
+            const dev  = obj.deviceId || deviceId;
+            const ipk  = obj.ipk || ipkName;
+            appendLog('[exit] ares install terminó con código: ' + code, 'log-exit');
+            if (code === 0) {
+              showNotice(
+                '<strong>⚠️ Comando terminó con código 0 — pero la instalación podría NO haberse completado</strong><br>' +
+                'El código de salida 0 no garantiza que el paquete esté instalado. ' +
+                'ares-install puede silenciar errores no fatales (device no alcanzable, app ya instalada en versión diferente, etc.).<br><br>' +
+                '<strong>Comprueba en la TV:</strong><br>' +
+                '• Ve a <em>Inicio &gt; Mis Apps</em> y busca la aplicación.<br>' +
+                '• O ejecuta los comandos siguientes en tu terminal:<br>' +
+                '<pre>' + escHtml(buildManualCmds(dev, ipk)) + '</pre>',
+                'warn'
+              );
             } else {
-              appendLog('[info] ' + JSON.stringify(obj));
+              showNotice(
+                '<strong>❌ ares install terminó con código ' + code + '</strong><br>' +
+                'Revisa los logs de stderr arriba para identificar el error.<br>' +
+                'Puedes intentar instalarlo manualmente:<br>' +
+                '<pre>' + escHtml(buildManualCmds(dev, ipk)) + '</pre>',
+                'fail'
+              );
             }
-          } catch (e) {
-            appendLog('[parse-error] ' + line);
+          } else {
+            appendLog('[info] ' + JSON.stringify(obj), 'log-info');
           }
         }
       }
-      appendLog('[info] Flujo finalizado.');
+      appendLog('[info] Flujo finalizado.', 'log-info');
     };
+
+    function escHtml(str) {
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
   </script>
 </body>
 </html>
